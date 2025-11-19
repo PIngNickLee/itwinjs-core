@@ -971,6 +971,10 @@
       "allowedCategories": [ "tools" ]
     },
     {
+      "name": "xlsx",
+      "allowedCategories": [ "internal" ]
+    },
+    {
       "name": "yargonaut",
       "allowedCategories": [ "tools" ]
     },

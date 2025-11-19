@@ -22,6 +22,8 @@ import { ECSchemaRpcImpl } from "@itwin/ecschema-rpcinterface-impl";
 import * as editorBuiltInCommands from "@itwin/editor-backend";
 import { FormatSet } from "@itwin/ecschema-metadata";
 import { AzureClientStorage, BlockBlobClientWrapperFactory } from "@itwin/object-storage-azure";
+import { pluginManager } from "./PluginManager";
+import { securePluginManager } from "./SecurePluginManager";
 
 /** Loads the provided `.env` file into process.env */
 function loadEnv(envFile: string) {
@@ -195,7 +197,7 @@ class DisplayTestAppRpc extends DtaRpcInterface {
       if (element instanceof Drawing)
         scaleFactor = element.scaleFactor;
     }
-    const textStyleResolver = new TextStyleResolver({textBlock, iModel, textStyleId: defaultTextStyleId});
+    const textStyleResolver = new TextStyleResolver({ textBlock, iModel, textStyleId: defaultTextStyleId });
     const layout = layoutTextBlock({ iModel, textBlock, textStyleResolver });
     const builder = new ElementGeometry.Builder();
     appendTextAnnotationGeometry({ layout, textStyleResolver, scaleFactor, annotationProps, builder, categoryId, wantDebugGeometry });
@@ -246,6 +248,7 @@ export const loadBackendConfig = (): DtaConfiguration => {
   return getConfig();
 };
 
+
 export const initializeDtaBackend = async (hostOpts?: ElectronHostOptions & MobileHostOpts) => {
   const dtaConfig = loadBackendConfig();
 
@@ -286,7 +289,64 @@ export const initializeDtaBackend = async (hostOpts?: ElectronHostOptions & Mobi
 
   /** register the implementation of our RPCs. */
   RpcManager.registerImpl(DtaRpcInterface, DisplayTestAppRpc);
-  RpcManager.registerImpl(ECSchemaRpcInterface, ECSchemaRpcImpl)
+  RpcManager.registerImpl(ECSchemaRpcInterface, ECSchemaRpcImpl);
+
+  // 根据环境变量选择插件管理器类型
+  const useSecurePluginManager = process.env.USE_SECURE_PLUGIN_MANAGER === "true";
+  const pluginManagerType = useSecurePluginManager ? "SecurePluginManager" : "PluginManager";
+
+  Logger.logInfo("Backend", "初始化插件管理器", () => ({
+    pluginManagerType,
+    useSecurePluginManager
+  }));
+
+  // 根据配置初始化相应的插件管理器
+  if (useSecurePluginManager) {
+    // 使用安全的Worker线程插件管理器
+    Logger.logInfo("Backend", "使用安全插件管理器（Worker Threads + VM沙箱）");
+
+    // 实际加载所有启用的插件到securePluginManager
+    const pluginListPath = path.join(__dirname, "..", "..", "plugins", "pluginlist.json");
+    if (fs.existsSync(pluginListPath)) {
+      const pluginListContent = fs.readFileSync(pluginListPath, "utf-8");
+      const pluginList = JSON.parse(pluginListContent);
+
+      let loadedCount = 0;
+      const enabledPlugins = pluginList.plugins.filter((p: any) => p.enabled);
+
+      // 异步加载所有启用的插件
+      for (const plugin of enabledPlugins) {
+        try {
+          await securePluginManager.loadPlugin(plugin);
+          loadedCount++;
+          Logger.logInfo("Backend", "插件加载到安全环境", () => ({ pluginName: plugin.name }));
+        } catch (error) {
+          Logger.logError("Backend", "安全插件加载失败", () => ({
+            pluginName: plugin.name,
+            error: error instanceof Error ? error.message : String(error)
+          }));
+        }
+      }
+
+      Logger.logInfo("Backend", "安全插件加载完成", () => ({
+        totalPlugins: pluginList.plugins.length,
+        enabledPlugins: enabledPlugins.length,
+        loadedPlugins: loadedCount,
+        runningPlugins: securePluginManager.getRunningPlugins().length
+      }));
+    } else {
+      Logger.logWarning("Backend", "插件列表文件未找到", () => ({ pluginListPath }));
+    }
+  } else {
+    // 使用传统插件管理器
+    pluginManager.loadPlugins();
+    pluginManager.startFileWatcher();
+
+    // Validate RPC registrations
+    const validationResults = pluginManager.validateRpcRegistrations();
+    Logger.logInfo("Backend", "RPC接口注册验证结果", () => ({ validationResults }));
+  }
+
   const authClient = await initializeAuthorizationClient();
   if (ProcessDetector.isElectronAppBackend) {
     opts.iModelHost.authorizationClient = authClient;

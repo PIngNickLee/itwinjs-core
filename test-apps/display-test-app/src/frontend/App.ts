@@ -3,7 +3,7 @@
 * See LICENSE.md in the project root for license terms and full copyright notice.
 *--------------------------------------------------------------------------------------------*/
 import "@bentley/icons-generic-webfont/dist/bentley-icons-generic-webfont.css";
-import { GuidString, ProcessDetector } from "@itwin/core-bentley";
+import { GuidString, Logger, ProcessDetector } from "@itwin/core-bentley";
 import { ElectronApp, ElectronAppOpts } from "@itwin/core-electron/lib/cjs/ElectronFrontend";
 import { BrowserAuthorizationClient } from "@itwin/browser-authorization";
 import { FrontendIModelsAccess } from "@itwin/imodels-access-frontend";
@@ -275,6 +275,20 @@ export class DisplayTestApp {
       /** API Url. Used to select environment. Defaults to "https://api.bentley.com/reality-management/reality-data" */
       baseUrl: `https://${import.meta.env.IMJS_URL_PREFIX ?? ""}api.bentley.com`,
     };
+
+    // 动态加载 GeologyPlugin 的 RPC 接口
+    let geologyRpcInterfaces: any[] = [];
+    try {
+      // 尝试加载 GeologyPlugin 的 RPC 接口 - 使用 ESM 模块避免 CJS 兼容性问题
+      const geologyModule = await import("../../plugins/GeologyPlugin/geologybim-common/lib/esm/SZEWGeologyBIMCommon");
+      if (geologyModule.SZEWGeologyBIMRpcInterface) {
+        geologyRpcInterfaces = [geologyModule.SZEWGeologyBIMRpcInterface];
+      }
+    } catch (error) {
+      // 忽略加载错误，继续启动应用
+      Logger.logError("App", "Failed to load GeologyPlugin RPC interface", () => ({ error }));
+    }
+
     const opts: ElectronAppOpts | LocalHostIpcAppOpts = {
       iModelApp: {
         accuDraw: new AccuDrawViewportUI(),
@@ -290,7 +304,8 @@ export class DisplayTestApp {
           DtaRpcInterface,
           IModelReadRpcInterface,
           IModelTileRpcInterface,
-          ECSchemaRpcInterface
+          ECSchemaRpcInterface,
+          ...geologyRpcInterfaces
         ],
         /* eslint-disable @typescript-eslint/naming-convention */
         mapLayerOptions: {

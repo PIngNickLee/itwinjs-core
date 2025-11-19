@@ -1,0 +1,20 @@
+{
+  "plugins": [
+    {
+      "name": "GeologyPlugin",
+      "enabled": true,
+      "path": "GeologyPlugin",
+      "rpcInterfaces": [
+        {
+          "interface": "SZEWGeologyBIMRpcInterface",
+          "implementation": "SZEWGeologyBIMRpcImplement"
+        }
+      ],
+      "initialization": {
+        "class": "SZEWGeologyBIMAdmin",
+        "method": "initialize",
+        "module": "geologybim-backend/SZEWGeologyBIMBackend.js"
+      }
+    }
+  ]
+}
