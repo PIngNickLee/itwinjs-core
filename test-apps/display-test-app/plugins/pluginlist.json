@@ -7,7 +7,9 @@
       "rpcInterfaces": [
         {
           "interface": "SZEWGeologyBIMRpcInterface",
-          "implementation": "SZEWGeologyBIMRpcImplement"
+          "implementation": "SZEWGeologyBIMRpcImplement",
+          "interfaceModule": "geologybim-common",
+          "implementationModule": "geologybim-backend"
         }
       ],
       "initialization": {

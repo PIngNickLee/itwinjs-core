@@ -33,11 +33,17 @@ exports.handler = async (argv) => {
   try {
     const outDir = getOutputDir(tsconfigPath);
     // overwrite package.json with the new type
-    fs.writeFileSync(packageJsonPath, JSON.stringify({ ...packageJson, type: "commonjs" }));
+    fs.writeFileSync(
+      packageJsonPath,
+      JSON.stringify({ ...packageJson, type: "commonjs" })
+    );
     // transpile
-    execSync(`tsc -p ${tsconfigPath}`, { stdio: "inherit", shell: true });
+    execSync(`tsc -p "${tsconfigPath}"`, { stdio: "inherit", shell: true });
     // emit module type to out dir
-    fs.writeFileSync(path.join(outDir, "package.json"), `{ "type": "commonjs" }`);
+    fs.writeFileSync(
+      path.join(outDir, "package.json"),
+      `{ "type": "commonjs" }`
+    );
   } catch (e) {
     console.error(e);
   } finally {
@@ -47,7 +53,9 @@ exports.handler = async (argv) => {
 };
 
 function getOutputDir(tsconfigPath) {
-  const res = execSync(`tsc -p ${tsconfigPath} --showConfig`, { shell: true });
+  const res = execSync(`tsc -p "${tsconfigPath}" --showConfig`, {
+    shell: true,
+  });
   const config = JSON.parse(res.toString());
   const outDir = config.compilerOptions.outDir;
   if (!outDir) {

@@ -17,6 +17,8 @@ export interface PluginConfig {
   rpcInterfaces: {
     interface: string;
     implementation: string;
+    interfaceModule?: string; // 接口模块路径
+    implementationModule?: string; // 实现模块路径
   }[];
   path?: string; // 插件路径，相对于plugins目录
   initialization?: {
@@ -123,8 +125,8 @@ class WorkerPluginManager {
         throw new Error(`无法解析插件路径: ${pluginName}`);
       }
 
-      // 创建安全的沙箱环境，传入插件路径用于node_modules查找
-      const sandbox = this.createSecureSandbox(pluginPath);
+      // 创建安全的沙箱环境，传入插件配置用于node_modules查找
+      const sandbox = this.createSecureSandbox(config);
 
       const pluginInstance: WorkerPluginInstance = {
         config,
@@ -153,9 +155,27 @@ class WorkerPluginManager {
   }
 
   /**
+   * 获取调用者信息
+   */
+  private getCallerInfo(moduleLoadStack: string[]): { callerModule: string; callStack: string[] } {
+    // 简化实现：返回当前调用栈信息
+    const stack = new Error().stack;
+    const callStack = stack ? stack.split('\n').slice(2, 5) : [];
+
+    return {
+      callerModule: moduleLoadStack[moduleLoadStack.length - 1] || "unknown",
+      callStack
+    };
+  }
+
+  /**
    * 创建安全沙箱环境
    */
-  private createSecureSandbox(_pluginPath?: string): vm.Context {
+  private createSecureSandbox(pluginConfig?: PluginConfig): vm.Context {
+    // 从插件配置解析插件路径和名称
+    const pluginPath = pluginConfig ? this.resolvePluginPath(pluginConfig) : undefined;
+    const pluginName = pluginConfig ? pluginConfig.name : undefined;
+
     // 基础安全全局对象
     const secureGlobal = {
       console: {
@@ -174,8 +194,11 @@ class WorkerPluginManager {
       clearTimeout,
       setInterval,
       clearInterval,
+      // eslint-disable-next-line @typescript-eslint/naming-convention
       JSON,
+      // eslint-disable-next-line @typescript-eslint/naming-convention
       Math,
+      // eslint-disable-next-line @typescript-eslint/naming-convention
       Date,
       // 限制访问其他全局对象
       process: {
@@ -184,12 +207,13 @@ class WorkerPluginManager {
         platform: "sandbox",
         version: process.version
       },
+      // eslint-disable-next-line @typescript-eslint/naming-convention
       Buffer,
       // 增强的require函数，支持核心模块、插件内部模块和相对路径
       require: (id: string) => {
         // 首先尝试在插件node_modules中查找
-        if (_pluginPath) {
-          const pluginNodeModulesPath = path.join(_pluginPath, "node_modules");
+        if (pluginPath) {
+          const pluginNodeModulesPath = path.join(pluginPath, "node_modules");
           if (fs.existsSync(pluginNodeModulesPath)) {
             const modulePath = path.join(pluginNodeModulesPath, id);
             if (fs.existsSync(modulePath)) {
@@ -216,7 +240,7 @@ class WorkerPluginManager {
                       const resolvedPath = path.resolve(baseDir, moduleId);
 
                       // 确保解析后的路径在插件目录内
-                      if (!resolvedPath.startsWith(_pluginPath)) {
+                      if (pluginPath && !resolvedPath.startsWith(pluginPath)) {
                         throw new Error(`试图访问插件外部路径: ${moduleId}`);
                       }
 
@@ -288,11 +312,11 @@ class WorkerPluginManager {
                   script.runInContext(context);
                   return exports;
                 }
-              } catch (error) {
+              } catch (_error) {
                 Logger.logWarning("PluginSandbox", `在插件node_modules中加载模块失败`, () => ({
                   module: id,
-                  pluginPath: _pluginPath,
-                  error: error instanceof Error ? error.message : String(error)
+                  pluginPath,
+                  error: _error instanceof Error ? _error.message : String(_error)
                 }));
                 // 继续尝试其他加载方式
               }
@@ -376,113 +400,119 @@ class WorkerPluginManager {
           }
         }
 
-        // 插件内部模块 - 允许加载插件目录下的模块
-        const pluginInternalModules = [
-          "@szew/geologybim-common",
-          "@szew/geologybim-backend",
-          "@szew/geologybim-frontend",
-          "@szew/corebim-backend"
-        ];
+        // 插件内部模块 - 允许加载插件目录下的模块，不限制具体模块名
+        try {
+          // 解析插件内部模块路径
+          const pluginBasePath = this._basePluginsPath;
+          let modulePath: string | null = null;
 
-        if (pluginInternalModules.includes(id)) {
-          try {
-            // 解析插件内部模块路径
-            const pluginBasePath = this._basePluginsPath;
-            let modulePath: string | null = null;
+          // 动态映射模块名到实际的插件目录
+          // 首先尝试将模块名直接映射到插件目录
+          const moduleName = id.replace(/^@[\w-]+\//, ""); // 移除scope前缀
 
-            // 根据模块名映射到实际的插件目录
-            if (id === "@szew/geologybim-common") {
-              modulePath = path.join(pluginBasePath, "GeologyPlugin", "geologybim-common");
-            } else if (id === "@szew/geologybim-backend") {
-              modulePath = path.join(pluginBasePath, "GeologyPlugin", "geologybim-backend");
-            } else if (id === "@szew/geologybim-frontend") {
-              modulePath = path.join(pluginBasePath, "GeologyPlugin", "geologybim-frontend");
-            } else if (id === "@szew/corebim-backend") {
-              modulePath = path.join(pluginBasePath, "GeologyPlugin", "corebim-backend");
+          // 获取插件名称，优先使用传入的插件名称，否则使用默认名称
+          const pluginDirName = pluginName || "GeologyPlugin";
+
+          const possiblePaths = [
+            // 尝试在插件目录下查找
+            path.join(pluginBasePath, pluginDirName, "node_modules", moduleName),
+            path.join(pluginBasePath, pluginDirName, "node_modules", id.replace(/\//g, "-")),
+            // 尝试直接使用模块名作为路径
+            path.join(pluginBasePath, moduleName),
+            path.join(pluginBasePath, "node_modules", id.replace(/\//g, "-")),
+            // 尝试在插件根目录下查找
+            path.join(pluginBasePath, pluginDirName, "node_modules", id)
+          ];
+
+          // 找到第一个存在的路径
+          for (const possiblePath of possiblePaths) {
+            if (fs.existsSync(possiblePath)) {
+              modulePath = possiblePath;
+              break;
             }
+          }
 
-            if (modulePath && fs.existsSync(modulePath)) {
-              // 尝试加载模块的主文件
-              const possibleEntries = [
-                path.join(modulePath, "lib", "cjs", "index.js"),
-                path.join(modulePath, "lib", "cjs", `${path.basename(modulePath)}.js`),
-                path.join(modulePath, "lib", "esm", "index.js"),
-                path.join(modulePath, "lib", "esm", `${path.basename(modulePath)}.js`),
-                path.join(modulePath, "index.js"),
-                path.join(modulePath, `${path.basename(modulePath)}.js`)
-              ];
+          if (modulePath && fs.existsSync(modulePath)) {
+            // 尝试加载模块的主文件
+            const possibleEntries = [
+              path.join(modulePath, "lib", "cjs", "index.js"),
+              path.join(modulePath, "lib", "cjs", `${path.basename(modulePath)}.js`),
+              path.join(modulePath, "lib", "esm", "index.js"),
+              path.join(modulePath, "lib", "esm", `${path.basename(modulePath)}.js`),
+              path.join(modulePath, "index.js"),
+              path.join(modulePath, `${path.basename(modulePath)}.js`)
+            ];
 
-              for (const entry of possibleEntries) {
-                if (fs.existsSync(entry)) {
-                  const content = fs.readFileSync(entry, "utf-8");
-                  const exports: Record<string, any> = {};
+            for (const entry of possibleEntries) {
+              if (fs.existsSync(entry)) {
+                const content = fs.readFileSync(entry, "utf-8");
+                const exports: Record<string, any> = {};
 
-                  // 创建支持相对路径的增强require函数
-                  const enhancedRequire = (moduleId: string) => {
-                    // 如果是相对路径，在插件目录内解析
-                    if (moduleId.startsWith('.')) {
-                      const baseDir = path.dirname(entry);
-                      const resolvedPath = path.resolve(baseDir, moduleId);
+                // 创建支持相对路径的增强require函数
+                const enhancedRequire = (moduleId: string) => {
+                  // 如果是相对路径，在插件目录内解析
+                  if (moduleId.startsWith('.')) {
+                    const baseDir = path.dirname(entry);
+                    const resolvedPath = path.resolve(baseDir, moduleId);
 
-                      // 确保解析后的路径在插件目录内
-                      if (!resolvedPath.startsWith(pluginBasePath)) {
-                        throw new Error(`试图访问插件外部路径: ${moduleId}`);
-                      }
-
-                      // 尝试多种可能的文件路径
-                      const moduleTryPaths = [
-                        resolvedPath,
-                        `${resolvedPath}.js`,
-                        `${resolvedPath}.ts`,
-                        path.join(resolvedPath, 'index.js'),
-                        path.join(resolvedPath, 'index.ts')
-                      ];
-
-                      for (const tryPath of moduleTryPaths) {
-                        if (fs.existsSync(tryPath)) {
-                          const moduleContent = fs.readFileSync(tryPath, "utf-8");
-                          const moduleExports: Record<string, any> = {};
-                          const moduleScript = new vm.Script(moduleContent);
-                          const moduleContext = vm.createContext({
-                            ...secureGlobal,
-                            module: { exports: moduleExports },
-                            exports: moduleExports,
-                            require: enhancedRequire
-                          });
-                          moduleScript.runInContext(moduleContext);
-                          return moduleExports;
-                        }
-                      }
-                      throw new Error(`无法找到相对路径模块: ${moduleId}`);
+                    // 确保解析后的路径在插件目录内
+                    if (!resolvedPath.startsWith(pluginBasePath)) {
+                      throw new Error(`试图访问插件外部路径: ${moduleId}`);
                     }
 
-                    // 对于非相对路径，使用原有的require逻辑
-                    return secureGlobal.require(moduleId);
-                  };
+                    // 尝试多种可能的文件路径
+                    const moduleTryPaths = [
+                      resolvedPath,
+                      `${resolvedPath}.js`,
+                      `${resolvedPath}.ts`,
+                      path.join(resolvedPath, 'index.js'),
+                      path.join(resolvedPath, 'index.ts')
+                    ];
 
-                  const script = new vm.Script(content);
-                  const context = vm.createContext({
-                    ...secureGlobal,
-                    module: { exports },
-                    exports,
-                    require: enhancedRequire
-                  });
-                  script.runInContext(context);
-                  return exports;
-                }
+                    for (const tryPath of moduleTryPaths) {
+                      if (fs.existsSync(tryPath)) {
+                        const moduleContent = fs.readFileSync(tryPath, "utf-8");
+                        const moduleExports: Record<string, any> = {};
+                        const moduleScript = new vm.Script(moduleContent);
+                        const moduleContext = vm.createContext({
+                          ...secureGlobal,
+                          module: { exports: moduleExports },
+                          exports: moduleExports,
+                          require: enhancedRequire
+                        });
+                        moduleScript.runInContext(moduleContext);
+                        return moduleExports;
+                      }
+                    }
+                    throw new Error(`无法找到相对路径模块: ${moduleId}`);
+                  }
+
+                  // 对于非相对路径，使用原有的require逻辑
+                  return secureGlobal.require(moduleId);
+                };
+
+                const script = new vm.Script(content);
+                const context = vm.createContext({
+                  ...secureGlobal,
+                  module: { exports },
+                  exports,
+                  require: enhancedRequire
+                });
+                script.runInContext(context);
+                return exports;
               }
-
-              throw new Error(`无法找到插件内部模块的入口文件: ${id}`);
-            } else {
-              throw new Error(`插件内部模块路径不存在: ${modulePath}`);
             }
-          } catch (error) {
-            Logger.logWarning("PluginSandbox", `加载插件内部模块失败`, () => ({
-              module: id,
-              error: error instanceof Error ? error.message : String(error)
-            }));
-            throw new Error(`无法加载插件内部模块: ${id}`);
+
+            throw new Error(`无法找到插件内部模块的入口文件: ${id}`);
+          } else {
+            throw new Error(`插件内部模块路径不存在: ${id}`);
           }
+        } catch (_error) {
+          Logger.logWarning("PluginSandbox", `加载插件内部模块失败`, () => ({
+            module: id,
+            error: _error instanceof Error ? _error.message : String(_error)
+          }));
+          // 不抛出错误，继续尝试其他加载方式
         }
 
         // 相对路径模块 - 在插件内部模块加载中已经处理
@@ -607,12 +637,15 @@ class WorkerPluginManager {
           // 在沙箱中执行模块代码
           const moduleExports: Record<string, any> = {};
           const moduleScript = new vm.Script(moduleContent);
+          // 获取插件路径用于node_modules查找
+          const pluginPath = this.resolvePluginPath(plugin.config);
+
           const context = vm.createContext({
             ...plugin.sandbox,
             module: { exports: moduleExports },
             exports: moduleExports,
             require: (id: string) => {
-              // 增强的require模拟，支持相对路径和文件扩展名
+              // 增强的require模拟，支持相对路径、插件node_modules和文件扩展名
               if (id.startsWith('.')) {
                 const baseDir = path.dirname(_modulePath);
                 const resolvedBase = path.resolve(baseDir, id);
@@ -660,8 +693,211 @@ class WorkerPluginManager {
                     }
                   }
                 }
+              } else {
+                // 对于非相对路径，首先尝试在当前模块目录的node_modules中查找
+                const currentModuleDir = path.dirname(_modulePath);
+                const currentModuleNodeModulesPath = path.join(currentModuleDir, "node_modules");
+                if (fs.existsSync(currentModuleNodeModulesPath)) {
+                  const modulePathInCurrent = path.join(currentModuleNodeModulesPath, id);
+                  if (fs.existsSync(modulePathInCurrent)) {
+                    try {
+                      // 读取package.json获取入口文件
+                      const packageJsonPath = path.join(modulePathInCurrent, "package.json");
+                      let entryFile = "index.js";
+
+                      if (fs.existsSync(packageJsonPath)) {
+                        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8"));
+                        entryFile = packageJson.main || entryFile;
+                      }
+
+                      const entryPath = path.join(modulePathInCurrent, entryFile);
+                      if (fs.existsSync(entryPath)) {
+                        const content = fs.readFileSync(entryPath, "utf-8");
+                        const exports: Record<string, any> = {};
+
+                        // 简单的require函数，只支持相对路径和核心模块，非相对路径使用沙箱的require
+                        const simpleRequire = (moduleId: string) => {
+                          if (moduleId.startsWith('.')) {
+                            const baseDir = path.dirname(entryPath);
+                            const resolvedPath = path.resolve(baseDir, moduleId);
+
+                            // 确保解析后的路径在插件目录内
+                            if (pluginPath && !resolvedPath.startsWith(pluginPath)) {
+                              throw new Error(`试图访问插件外部路径: ${moduleId}`);
+                            }
+
+                            // 尝试多种可能的文件路径
+                            const moduleTryPaths = [
+                              resolvedPath,
+                              `${resolvedPath}.js`,
+                              `${resolvedPath}.ts`,
+                              path.join(resolvedPath, 'index.js'),
+                              path.join(resolvedPath, 'index.ts')
+                            ];
+
+                            for (const tryPath of moduleTryPaths) {
+                              if (fs.existsSync(tryPath)) {
+                                const innerModuleContent = fs.readFileSync(tryPath, "utf-8");
+                                const innerModuleExports: Record<string, any> = {};
+                                const innerModuleScript = new vm.Script(innerModuleContent);
+                                const innerModuleContext = vm.createContext({
+                                  ...plugin.sandbox,
+                                  module: { exports: innerModuleExports },
+                                  exports: innerModuleExports,
+                                  require: simpleRequire
+                                });
+                                innerModuleScript.runInContext(innerModuleContext);
+                                return innerModuleExports;
+                              }
+                            }
+                            throw new Error(`无法找到相对路径模块: ${moduleId}`);
+                          } else {
+                            // 对于非相对路径，使用沙箱的require
+                            return plugin.sandbox.require(moduleId);
+                          }
+                        };
+
+                        const script = new vm.Script(content);
+                        const moduleContext = vm.createContext({
+                          ...plugin.sandbox,
+                          module: { exports },
+                          exports,
+                          require: simpleRequire
+                        });
+                        script.runInContext(moduleContext);
+                        return exports;
+                      }
+                    } catch (_error) {
+                      Logger.logWarning("PluginSandbox", `在当前模块node_modules中加载模块失败`, () => ({
+                        module: id,
+                        currentModuleDir,
+                        error: _error instanceof Error ? _error.message : String(_error)
+                      }));
+                      // 继续尝试其他加载方式
+                    }
+                  }
+                }
+
+                // 如果当前模块目录的node_modules中找不到，再尝试在插件根目录的node_modules中查找
+                if (pluginPath) {
+                  const pluginNodeModulesPath = path.join(pluginPath, "node_modules");
+                  if (fs.existsSync(pluginNodeModulesPath)) {
+                    const modulePath = path.join(pluginNodeModulesPath, id);
+                    if (fs.existsSync(modulePath)) {
+                      try {
+                        // 读取package.json获取入口文件
+                        const packageJsonPath = path.join(modulePath, "package.json");
+                        let entryFile = "index.js";
+
+                        if (fs.existsSync(packageJsonPath)) {
+                          const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8"));
+                          entryFile = packageJson.main || entryFile;
+                        }
+
+                        const entryPath = path.join(modulePath, entryFile);
+                        if (fs.existsSync(entryPath)) {
+                          const content = fs.readFileSync(entryPath, "utf-8");
+                          const exports: Record<string, any> = {};
+
+                          // 递归支持插件node_modules的require函数
+                          const pluginNodeModulesRequire = (moduleId: string) => {
+                            // 如果是相对路径，在当前模块目录内解析
+                            if (moduleId.startsWith('.')) {
+                              const baseDir = path.dirname(entryPath);
+                              const resolvedPath = path.resolve(baseDir, moduleId);
+
+                              // 确保解析后的路径在插件目录内
+                              if (pluginPath && !resolvedPath.startsWith(pluginPath)) {
+                                throw new Error(`试图访问插件外部路径: ${moduleId}`);
+                              }
+
+                              // 尝试多种可能的文件路径
+                              const moduleTryPaths = [
+                                resolvedPath,
+                                `${resolvedPath}.js`,
+                                `${resolvedPath}.ts`,
+                                path.join(resolvedPath, 'index.js'),
+                                path.join(resolvedPath, 'index.ts')
+                              ];
+
+                              for (const tryPath of moduleTryPaths) {
+                                if (fs.existsSync(tryPath)) {
+                                  const nestedModuleContent = fs.readFileSync(tryPath, "utf-8");
+                                  const nestedModuleExports: Record<string, any> = {};
+                                  const nestedModuleScript = new vm.Script(nestedModuleContent);
+                                  const nestedModuleContext = vm.createContext({
+                                    ...plugin.sandbox,
+                                    module: { exports: nestedModuleExports },
+                                    exports: nestedModuleExports,
+                                    require: pluginNodeModulesRequire
+                                  });
+                                  nestedModuleScript.runInContext(nestedModuleContext);
+                                  return nestedModuleExports;
+                                }
+                              }
+                              throw new Error(`无法找到相对路径模块: ${moduleId}`);
+                            }
+
+                            // 对于非相对路径，尝试在当前插件的node_modules中查找
+                            const nestedModulePath = path.join(pluginNodeModulesPath, moduleId);
+                            if (fs.existsSync(nestedModulePath)) {
+                              const nestedPackageJsonPath = path.join(nestedModulePath, "package.json");
+                              let nestedEntryFile = "index.js";
+
+                              if (fs.existsSync(nestedPackageJsonPath)) {
+                                const nestedPackageJson = JSON.parse(fs.readFileSync(nestedPackageJsonPath, "utf-8"));
+                                nestedEntryFile = nestedPackageJson.main || nestedEntryFile;
+                              }
+
+                              const nestedEntryPath = path.join(nestedModulePath, nestedEntryFile);
+                              if (fs.existsSync(nestedEntryPath)) {
+                                const nestedContent = fs.readFileSync(nestedEntryPath, "utf-8");
+                                const nestedExports: Record<string, any> = {};
+                                const nestedScript = new vm.Script(nestedContent);
+                                const nestedContext = vm.createContext({
+                                  ...plugin.sandbox,
+                                  module: { exports: nestedExports },
+                                  exports: nestedExports,
+                                  require: pluginNodeModulesRequire
+                                });
+                                nestedScript.runInContext(nestedContext);
+                                return nestedExports;
+                              }
+                            }
+
+                            // 如果当前插件node_modules中找不到，使用原有的require逻辑
+                            return context.require(moduleId);
+                          };
+
+                          const script = new vm.Script(content);
+                          const moduleContext = vm.createContext({
+                            ...plugin.sandbox,
+                            module: { exports },
+                            exports,
+                            require: pluginNodeModulesRequire
+                          });
+                          script.runInContext(moduleContext);
+                          return exports;
+                        }
+                      } catch (_error) {
+                        Logger.logWarning("PluginSandbox", `在插件node_modules中加载模块失败`, () => ({
+                          module: id,
+                          pluginPath,
+                          error: _error instanceof Error ? _error.message : String(_error)
+                        }));
+                        // 继续尝试其他加载方式
+                      }
+                    }
+                  }
+                }
               }
-              throw new Error(`无法解析模块: ${id}`);
+
+              // 如果插件node_modules中找不到，使用沙箱的require函数
+              try {
+                return plugin.sandbox.require(id);
+              } catch {
+                throw new Error(`无法解析模块: ${id}`);
+              }
             }
           });
 
@@ -698,32 +934,64 @@ class WorkerPluginManager {
   /**
    * 获取可能的模块路径
    */
-  private getPossibleModulePaths(pluginConfig: PluginConfig, _className: string, type: "interface" | "implementation"): string[] {
+  private getPossibleModulePaths(pluginConfig: PluginConfig, className: string, type: "interface" | "implementation"): string[] {
     const pluginPath = this.resolvePluginPath(pluginConfig);
     if (!pluginPath) return [];
 
     const paths: string[] = [];
 
-    // 根据类型确定可能的模块位置
+    // 根据插件配置和类型动态构建路径
     if (type === "interface") {
-      // 接口通常在common模块中
+      // 接口模块可能的位置
+      // 1. 使用配置的接口模块路径
+      const rpcInterface = pluginConfig.rpcInterfaces.find(rpc => rpc.interface === className);
+      if (rpcInterface?.interfaceModule) {
+        paths.push(
+          path.join(pluginPath, rpcInterface.interfaceModule, "lib", "cjs", `${rpcInterface.interfaceModule}.js`),
+          //path.join(pluginPath, rpcInterface.interfaceModule, "lib", "cjs", `${className}.js`),
+          path.join(pluginPath, rpcInterface.interfaceModule, "lib", "esm", `${rpcInterface.interfaceModule}.js`),
+          //path.join(pluginPath, rpcInterface.interfaceModule, "lib", "esm", `${className}.js`)
+        );
+      }
+
+      // 2. 在插件目录本身中
       paths.push(
-        path.join(pluginPath, "geologybim-common", "lib", "cjs", "geologybim-common.js"),
-        path.join(pluginPath, "geologybim-common", "lib", "cjs", "SZEWGeologyBIMCommon.js"),
-        path.join(pluginPath, "geologybim-common", "lib", "esm", "geologybim-common.js"),
-        path.join(pluginPath, "geologybim-common", "lib", "esm", "SZEWGeologyBIMCommon.js")
+        path.join(pluginPath, "lib", "cjs", `${pluginConfig.name}.js`),
+        path.join(pluginPath, "lib", "cjs", `${className}.js`),
+        path.join(pluginPath, "lib", "esm", `${pluginConfig.name}.js`),
+        path.join(pluginPath, "lib", "esm", `${className}.js`)
       );
     } else {
-      // 实现在backend模块中
+      // 实现模块可能的位置
+      // 1. 使用配置的实现模块路径
+      const rpcInterface = pluginConfig.rpcInterfaces.find(rpc => rpc.implementation === className);
+      if (rpcInterface?.implementationModule) {
+        paths.push(
+          path.join(pluginPath, rpcInterface.implementationModule, "lib", "cjs", `${rpcInterface.implementationModule}.js`),
+          //path.join(pluginPath, rpcInterface.implementationModule, "lib", "cjs", `${className}.js`),
+          path.join(pluginPath, rpcInterface.implementationModule, "lib", "esm", `${rpcInterface.implementationModule}.js`),
+          //path.join(pluginPath, rpcInterface.implementationModule, "lib", "esm", `${className}.js`)
+        );
+      }
+
+      // 2. 在插件目录本身中
       paths.push(
-        path.join(pluginPath, "geologybim-backend", "lib", "cjs", "geologybim-backend.js"),
-        path.join(pluginPath, "geologybim-backend", "lib", "cjs", "SZEWGeologyBIMBackend.js"),
-        path.join(pluginPath, "geologybim-backend", "lib", "esm", "geologybim-backend.js"),
-        path.join(pluginPath, "geologybim-backend", "lib", "esm", "SZEWGeologyBIMBackend.js")
+        path.join(pluginPath, "lib", "cjs", `${pluginConfig.name}.js`),
+        path.join(pluginPath, "lib", "cjs", `${className}.js`),
+        path.join(pluginPath, "lib", "esm", `${pluginConfig.name}.js`),
+        path.join(pluginPath, "lib", "esm", `${className}.js`)
       );
     }
 
-    return paths;
+    // 添加通用的模块路径模式
+    // paths.push(
+    //   path.join(pluginPath, "lib", "cjs", "index.js"),
+    //   path.join(pluginPath, "lib", "esm", "index.js"),
+    //   path.join(pluginPath, "dist", "index.js"),
+    //   path.join(pluginPath, "src", "index.js")
+    // );
+
+    return paths.filter((p, index, array) => array.indexOf(p) === index); // 去重
   }
 
   /**
